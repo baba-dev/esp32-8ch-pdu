@@ -2,15 +2,14 @@
 DIY ESPHome powered 8 Channel Power Delivery Unit with code, 3d Case &amp; Instructions.
 
 
-# ⚡ Ultimate DIY 8-Channel ESP32 PDU
+⚡ Ultimate DIY 8-Channel ESP32 PDU - Detailed at [BabaBuilds.com - DIY PDU Guide](https://bababuilds.com/blog/diy-8-channel-esp32-pdu/)
 
 [![ESPHome](https://img.shields.io/badge/Powered%20by-ESPHome-black?logo=esphome)](https://esphome.io)
 [![Home Assistant](https://img.shields.io/badge/Works%20with-Home%20Assistant-blue?logo=home-assistant)](https://www.home-assistant.io)
 
 A professional-grade, 8-channel smart Power Distribution Unit (PDU) built on the ESP32 platform. This project replaces expensive commercial smart PDUs with a fully local, highly customizable solution featuring real-time RMS monitoring, OLED telemetry, and individual relay control.
 
-![Project Image](images/pdu-finished.jpg)
-*(Add a photo of your finished build here)*
+
 
 ## 🚀 Features
 
@@ -46,13 +45,6 @@ A professional-grade, 8-channel smart Power Distribution Unit (PDU) built on the
 | **WCS1700** | Analog Out | 35 | **MUST** power with 5V (VIN) |
 
 > **⚠️ WCS1700 Note:** You must power the WCS1700 sensor from the **VIN (5V)** pin. If powered via 3.3V, sensitivity is too low to detect small loads.
-
-## ⚙️ Installation
-
-1.  Clone this repository.
-2.  Copy `secrets.yaml.example` to `secrets.yaml` and enter your Wi-Fi credentials.
-3.  Open `esp32-8ch-pdu.yaml` in ESPHome.
-4.  Flash to your ESP32.
 
 ## 🎛️ How to Calibrate (The "Smart" Way)
 
