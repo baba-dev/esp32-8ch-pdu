@@ -1,0 +1,444 @@
+esphome:
+  name: esp32-8ch-pdu
+  friendly_name: ESP32-8CH-PDU
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+# Enable logging
+logger:
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: "KEY"
+
+ota:
+  - platform: esphome
+    password: "OTAPASS"
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "Esp32-8Ch-Pdu Fallback Hotspot"
+    password: "FALLBACK-PASS"
+
+captive_portal:
+
+# --- TIME SOURCE ---
+time:
+  - platform: sntp
+    id: my_time
+    timezone: "Asia/Kolkata"  # Set to your local time for correct midnight reset
+    
+# Enable Web Server (Optional - view status via IP address)
+web_server:
+  port: 80
+
+# --- I2C & DISPLAY CONFIGURATION (NEW) ---
+i2c:
+  sda: 22
+  scl: 21
+  scan: true
+  id: bus_a
+
+font:
+  - file: "gfonts://Roboto"
+    id: roboto_12
+    size: 12
+  - file: "gfonts://Roboto"
+    id: roboto_20
+    size: 20
+
+display:
+  - platform: ssd1306_i2c
+    model: "SSD1306 128x64"  # JMD 1.3" usually uses SH1106 driver
+    address: 0x3C           # Try 0x3D if screen stays black
+    id: pdu_display
+    contrast: 100%
+    brightness: 100%    
+    i2c_id: bus_a
+    lambda: |-
+      // Draw Header
+      it.print(0, 0, id(roboto_12), "PDU MASTER");
+      
+      // Draw Voltage (Large)
+      it.printf(0, 16, id(roboto_20), "Load: %.0f W", id(pdu_power).state);
+      
+      // Draw Power & Current
+      it.printf(0, 40, id(roboto_12), "%.1f V", id(pdu_voltage).state);
+      it.printf(0, 52, id(roboto_12), "Amps: %.2f A", id(pdu_current).state);
+
+# --- 1. GLOBAL VARIABLE (Stores the calibration math permanently) ---
+globals:
+  - id: voltage_calib_factor
+    type: float
+    restore_value: yes
+    initial_value: '4450.0' # A safe starting guess (approx 230V / 0.051)
+
+  - id: current_calib_factor_new 
+    type: float
+    restore_value: yes
+    initial_value: '31.25'
+
+
+# --- 2. USER INPUTS (Web UI) ---
+number:
+  - platform: template
+    name: "Calibrate: Known Load (Watts)"
+    id: calib_target_watts
+    optimistic: true
+    min_value: 0
+    max_value: 3000
+    step: 10
+    mode: BOX  # Allows typing the number
+
+# NEW: VOLTAGE CALIBRATION INPUT
+  - platform: template
+    name: "Calibrate: Real Voltage (Volts)"
+    id: calib_target_voltage
+    optimistic: true
+    min_value: 0
+    max_value: 300
+    step: 1
+    mode: BOX
+    
+button:
+  - platform: template
+    name: "Action: Calibrate Current Sensor"
+    on_press:
+      - lambda: |-
+          // 1. Safety Checks
+          if (id(pdu_voltage).state < 100) {
+            ESP_LOGE("calib", "Voltage too low! Cannot calibrate.");
+            return;
+          }
+          if (id(calib_target_watts).state < 10) {
+             ESP_LOGE("calib", "Target Watts too low!");
+             return;
+          }
+
+          // 2. The Math
+          // Real Amps = Watts / Volts
+          float real_amps = id(calib_target_watts).state / id(pdu_voltage).state;
+          
+          // Raw Reading from Sensor
+          float raw_reading = id(pdu_current_raw).state;
+          
+          if (raw_reading < 0.001) {
+            ESP_LOGE("calib", "Sensor reading is zero! Is the appliance on?");
+            return;
+          }
+
+          // Calculate the new Ratio
+          float new_factor = real_amps / raw_reading;
+          
+          // 3. Save & Apply
+          // UPDATED: Using the NEW variable name
+          id(current_calib_factor_new) = new_factor; 
+          
+          ESP_LOGI("calib", "Calibration Success! Real Amps: %.2f, New Factor: %.4f", real_amps, new_factor);
+
+  - platform: template
+    name: "Action: Calibrate Voltage (Volts)"
+    on_press:
+      - lambda: |-
+          if (id(calib_target_voltage).state < 10) {
+             ESP_LOGE("calib", "Target Voltage too low!");
+             return;
+          }
+          
+          // Get the raw RMS signal
+          float raw_signal = id(pdu_voltage_raw).state;
+          
+          if (raw_signal < 0.001) {
+             ESP_LOGE("calib", "Sensor signal is 0! Is it plugged in?");
+             return;
+          }
+
+          // Calculate Ratio
+          float new_factor = id(calib_target_voltage).state / raw_signal;
+          
+          // Save
+          id(voltage_calib_factor) = new_factor;
+          // REMOVED .save()
+          
+          ESP_LOGI("calib", "Voltage Calibrated! Factor: %.2f", new_factor);
+# --- RELAY CONFIGURATION ---
+# Mapped to your specific wiring: 13, 14, 27, 26, 25, 33, 32, 4
+switch:
+  - platform: gpio
+    name: "PDU Relay 1 - Network Switch"
+    id: relay_1
+    pin:
+      number: 13
+      inverted: false  # 'true' for Active Low relay boards
+    restore_mode: ALWAYS_ON # Safety: Stay OFF after power loss
+
+  - platform: gpio
+    name: "PDU Relay 2 - Pi Local Server 2"
+    id: relay_2
+    pin:
+      number: 14
+      inverted: false
+    restore_mode: ALWAYS_ON
+
+  - platform: gpio
+    name: "PDU Relay 3 - Lenovo M3 Tiny PC"
+    id: relay_3
+    pin:
+      number: 27
+      inverted: false
+    restore_mode: RESTORE_DEFAULT_OFF
+
+  - platform: gpio
+    name: "PDU Relay 4 - Pi Local Server 1"
+    id: relay_4
+    pin:
+      number: 26
+      inverted: false
+    restore_mode: ALWAYS_ON
+
+  - platform: gpio
+    name: "PDU Relay 5 - Intel Local Server 1"
+    id: relay_5
+    pin:
+      number: 25
+      inverted: false
+    restore_mode: ALWAYS_ON
+
+  - platform: gpio
+    name: "PDU Relay 6 - Ventilation Fan 1"
+    id: relay_6
+    pin:
+      number: 33
+      inverted: false
+    restore_mode: RESTORE_DEFAULT_OFF
+
+  - platform: gpio
+    name: "PDU Relay 7"
+    id: relay_7
+    pin:
+      number: 32
+      inverted: false
+    restore_mode: RESTORE_DEFAULT_OFF
+
+  - platform: gpio
+    name: "PDU Relay 8"
+    id: relay_8
+    pin:
+      number: 4
+      inverted: false
+    restore_mode: RESTORE_DEFAULT_OFF
+
+# --- NEW AUTO MODE SWITCH ---
+  - platform: template
+    name: "LED Auto Mode"
+    id: led_auto_mode
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    icon: "mdi:robot"
+# --- SENSOR CONFIGURATION ---
+
+sensor:
+  # --- INTERNAL ADC SENSORS (Reads the raw pins) ---
+# --- INTERNAL ADC READERS ---
+  - platform: adc
+    pin: GPIO34
+    id: voltage_adc_source
+    attenuation: 11db
+    internal: true
+
+  # --- VOLTAGE PROCESSING ---
+  # 1. RAW RMS (Calculates the "size" of the wave)
+  - platform: ct_clamp
+    sensor: voltage_adc_source
+    id: pdu_voltage_raw
+    update_interval: 2s
+    internal: true
+    filters:
+      - calibrate_linear:
+          - 0.0 -> 0.0
+          - 1.0 -> 1.0 # Pass through raw RMS
+
+  # 2. FINAL VOLTAGE (Applies Calibration + Smoothing)
+  - platform: template
+    name: "PDU Voltage"
+    id: pdu_voltage
+    unit_of_measurement: "V"
+    accuracy_decimals: 1
+    update_interval: 1s # Faster update, smoothed by filter below
+    lambda: |-
+      float raw = id(pdu_voltage_raw).state;
+      float val = raw * id(voltage_calib_factor);
+      
+      // "Ghost Voltage" Cutoff
+      if (val < 50) return 0.0;
+      return val;
+    filters:
+      # SMOOTHING: Alpha 0.2 means "Take 20% new value, 80% old value".
+      # This kills the "jitter" but reacts fast to real changes.
+      - exponential_moving_average:
+          alpha: 0.2
+          send_every: 1
+      
+      # ANTI-SPAM: Only update HA if voltage changes by > 0.5V
+      - or:
+          - throttle: 60s
+          - delta: 0.5
+          
+  - platform: adc
+    pin: GPIO35
+    id: current_adc_source
+    attenuation: 11db
+    internal: true
+
+  # --- PROCESSED SENSORS (Calculates RMS) ---
+
+
+# RAW CURRENT (Uncalibrated RMS)
+  # This reads the raw "strength" of the signal
+  - platform: ct_clamp
+    sensor: current_adc_source
+    id: pdu_current_raw
+    update_interval: 2s
+    internal: true # Hide from Home Assistant
+    filters:
+      - calibrate_linear:
+          - 0.0 -> 0.0
+          - 1.0 -> 1.0 # Pass-through (No math yet)
+
+  # FINAL CURRENT (Applied Calibration)
+  - platform: template
+    name: "PDU Current"
+    id: pdu_current
+    unit_of_measurement: "A"
+    accuracy_decimals: 2
+    update_interval: 2s
+    lambda: |-
+      float raw = id(pdu_current_raw).state;
+      
+      // Use the NEW global ID here
+      float val = raw * id(current_calib_factor_new); 
+      
+      // NO FILTER: Show exactly what is happening
+      return val;
+
+  # POWER & ENERGY (Standard)
+  - platform: template
+    name: "PDU Power"
+    id: pdu_power
+    lambda: return id(pdu_voltage).state * id(pdu_current).state;
+    update_interval: 2s
+    unit_of_measurement: "W"
+    accuracy_decimals: 1
+
+  - platform: total_daily_energy
+    name: "PDU Daily Energy"
+    power_id: pdu_power
+    unit_of_measurement: "kWh"
+
+# --- HARDWARE STATUS ---
+binary_sensor:
+  - platform: status
+    name: "PDU Status"    
+
+light:
+  - platform: esp32_rmt_led_strip
+    rgb_order: GRB
+    name: "PDU Status LEDs"
+    id: pdu_leds
+    pin: 18         # Recommended: GPIO 18. (Change to 5 if using D5)
+    num_leds: 10     # <--- Set this to your exact LED count
+    chipset: ws2812
+    restore_mode: ALWAYS_ON
+    
+    # --- THE 5 COOL EFFECTS ---
+    effects:
+      # 1. Rainbow: Smoothly cycles colors across the whole strip
+      - addressable_rainbow:
+          name: "Rainbow Flow"
+          speed: 10
+          width: 50
+
+      # 2. Cylon (Scanner): A red "eye" moving back and forth (Battlestar Galactica style)
+      - addressable_scan:
+          name: "System Scan"
+          move_interval: 100ms
+          scan_width: 1
+
+      # 3. Pulse: Gently breathes a color (Good for "System Normal" status)
+      - pulse:
+          name: "Breathing"
+          update_interval: 2s
+          min_brightness: 10%
+          max_brightness: 100%
+
+      # 4. Twinkle: Random pixels flash like stars (Good for idle)
+      - addressable_twinkle:
+          name: "Data Activity"
+          twinkle_probability: 5%
+          progress_interval: 4ms
+
+      # 5. Police Strobe: Flashes Red and Blue violently (Great for "Overload" alarms)
+      - strobe:
+          name: "Critical Alarm"
+          colors:
+            - state: true
+              brightness: 100%
+              red: 100%
+              green: 0%
+              blue: 0%
+              duration: 100ms
+            - state: true
+              brightness: 100%
+              red: 0%
+              green: 0%
+              blue: 100%
+              duration: 100ms
+
+# Add this at the bottom of your YAML
+interval:
+  - interval: 2s
+    then:
+      - if:
+          condition:
+            # ONLY run this logic if "LED Auto Mode" is ON
+            lambda: 'return id(led_auto_mode).state;'
+          then:
+            - if:
+                condition:
+                  # TRIGGER: High Load (> 2500W)
+                  lambda: 'return id(pdu_power).state > 2500.0;'
+                then:
+                  - light.turn_on:
+                      id: pdu_leds
+                      effect: "Critical Alarm"
+                else:
+                  - if:
+                      condition:
+                        # TRIGGER: Any Relay is ON
+                        or:
+                          - switch.is_on: relay_1
+                          - switch.is_on: relay_2
+                          - switch.is_on: relay_3
+                          - switch.is_on: relay_4
+                          - switch.is_on: relay_5
+                          - switch.is_on: relay_6
+                          - switch.is_on: relay_7
+                          - switch.is_on: relay_8
+                      then:
+                        - light.turn_on:
+                            id: pdu_leds
+                            brightness: 90%
+                            effect: "Rainbow Flow"
+                      else:
+                        - light.turn_on:
+                            id: pdu_leds
+                            brightness: 20%
+                            effect: "Rainbow Flow"
